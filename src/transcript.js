@@ -32,6 +32,11 @@ function walkFiles(root, suffix, output) {
   }
 }
 
+export function isSubagentTranscript(file) {
+  const segments = path.normalize(file).split(path.sep).map((segment) => segment.toLowerCase());
+  return segments.includes("subagents") || /^agent-/i.test(path.basename(file));
+}
+
 export function findTranscript(query, cwd = process.cwd()) {
   if (query && fs.existsSync(path.resolve(query))) return path.resolve(query);
 
@@ -45,7 +50,9 @@ export function findTranscript(query, cwd = process.cwd()) {
   const files = [];
   walkFiles(path.join(os.homedir(), ".claude", "projects"), ".jsonl", files);
   const wanted = query || activeSession;
-  const matching = wanted ? files.filter((file) => path.basename(file, ".jsonl") === wanted) : files;
+  const matching = wanted
+    ? files.filter((file) => path.basename(file, ".jsonl") === wanted)
+    : files.filter((file) => !isSubagentTranscript(file));
   matching.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
   return matching[0];
 }
@@ -60,12 +67,13 @@ export function findTranscriptCandidates(cwd = process.cwd()) {
 
   const files = [];
   walkFiles(path.join(os.homedir(), ".claude", "projects"), ".jsonl", files);
+  const mainFiles = files.filter((file) => !isSubagentTranscript(file));
   const activeFile = activeSession
-    ? files.find((file) => path.basename(file, ".jsonl") === activeSession)
+    ? mainFiles.find((file) => path.basename(file, ".jsonl") === activeSession)
     : undefined;
   const candidates = activeFile
-    ? files.filter((file) => path.dirname(file) === path.dirname(activeFile))
-    : files;
+    ? mainFiles.filter((file) => path.dirname(file) === path.dirname(activeFile))
+    : mainFiles;
   return candidates.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
 }
 

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { parseJsonl, analyzeTranscript, activeChain } from "../src/transcript.js";
+import { parseJsonl, analyzeTranscript, activeChain, isSubagentTranscript } from "../src/transcript.js";
 import { sanitizeHookInput } from "../src/hook.js";
 
 function assistant(uuid, parentUuid, id, usage, content) {
@@ -91,6 +91,12 @@ test("parser tolerates a partially-written final JSONL line", async () => {
   const parsed = await parseJsonl(file);
   assert.equal(parsed.entries.length, 1);
   assert.deepEqual(parsed.malformed, [2]);
+});
+
+test("distinguishes main transcripts from nested subagent transcripts", () => {
+  assert.equal(isSubagentTranscript(path.join("project", "session.jsonl")), false);
+  assert.equal(isSubagentTranscript(path.join("project", "session", "subagents", "agent-123.jsonl")), true);
+  assert.equal(isSubagentTranscript(path.join("project", "agent-123.jsonl")), true);
 });
 
 test("hook sanitizer records measurements but no sensitive content", () => {

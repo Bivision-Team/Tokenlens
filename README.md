@@ -39,6 +39,8 @@ If the current session only contains a failed request (for example, a usage-limi
 node /absolute/path/to/Tokenlens/bin/tokenlens.js previous
 ```
 
+`current` and `previous` select main-session transcripts only. To inspect a subagent intentionally, pass its transcript path or agent ID to `session`.
+
 Invoking `/tokenlens:report` itself creates a small Claude turn. The standalone CLI does not.
 
 Analyze a specific transcript or session ID:
