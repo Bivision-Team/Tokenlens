@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-import { findTranscript, findTranscriptCandidates, parseJsonl, analyzeTranscript } from "./transcript.js";
-import { renderReport } from "./report.js";
+import { findTranscript, findTranscriptCandidates, findAllMainTranscripts, dedupeTranscriptEntries, parseJsonl, analyzeTranscript } from "./transcript.js";
+import { renderReport, renderAggregateReport } from "./report.js";
 import { dataDir } from "./privacy.js";
 
 function help() {
@@ -10,6 +10,7 @@ function help() {
 Usage:
   tokenlens current [--json]
   tokenlens previous [--json]
+  tokenlens aggregate [--since 30d|YYYY-MM-DD] [--json]
   tokenlens session <session-id|transcript-path> [--json]
   tokenlens doctor
 
@@ -42,6 +43,58 @@ async function analyzePrevious(json) {
   throw new Error("No previous successful Claude Code session was found for this project.");
 }
 
+function parseSince(value = "30d") {
+  const now = new Date();
+  const days = /^(\d+)d$/i.exec(value);
+  if (days) return new Date(now.getTime() - Number(days[1]) * 86_400_000);
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) throw new Error(`Invalid --since value: ${value}. Use 30d or YYYY-MM-DD.`);
+  return parsed;
+}
+
+async function analyzeAggregate(args, json) {
+  const sinceIndex = args.indexOf("--since");
+  const since = parseSince(sinceIndex >= 0 ? args[sinceIndex + 1] : "30d");
+  const until = new Date();
+  const eligibleFiles = findAllMainTranscripts().filter((file) => fs.statSync(file).mtimeMs >= since.getTime());
+  const entries = [];
+  const sessionIds = new Set();
+  let malformedCount = 0;
+
+  for (const file of eligibleFiles) {
+    const parsed = await parseJsonl(file);
+    malformedCount += parsed.malformed.length;
+    const inPeriod = parsed.entries.filter((entry) => {
+      const timestamp = Date.parse(entry.timestamp || "");
+      return Number.isFinite(timestamp) && timestamp >= since.getTime() && timestamp <= until.getTime();
+    });
+    if (!inPeriod.length) continue;
+    sessionIds.add(inPeriod.find((entry) => entry.sessionId)?.sessionId || path.basename(file, ".jsonl"));
+    entries.push(...inPeriod);
+  }
+
+  const deduped = dedupeTranscriptEntries(entries);
+  const base = analyzeTranscript(deduped, Array.from({ length: malformedCount }), { scope: "all" });
+  const report = {
+    schema_version: 1,
+    measurement_policy: base.measurement_policy,
+    period: { since: since.toISOString(), until: until.toISOString() },
+    sessions: { count: sessionIds.size, transcript_files_scanned: eligibleFiles.length },
+    usage: base.session,
+    messages: {
+      attributed_tokens: base.context.attributed_message_tokens,
+      categories: base.context.categories
+    },
+    repeated_reads: base.repeated_reads,
+    warnings: [
+      ...base.warnings,
+      "Aggregate categories count unique recorded content, not cumulative context exposure across requests.",
+      "Entries are included by their own timestamp; transcript modification time is used only as a scan optimization."
+    ]
+  };
+  console.log(json ? JSON.stringify(report, null, 2) : renderAggregateReport(report));
+}
+
 function doctor() {
   const checks = {
     node: process.version,
@@ -59,6 +112,7 @@ export async function main(args) {
   const json = args.includes("--json");
   if (command === "current") return analyze(undefined, json);
   if (command === "previous") return analyzePrevious(json);
+  if (command === "aggregate") return analyzeAggregate(args.slice(1), json);
   if (command === "session") return analyze(args.slice(1).find((arg) => !arg.startsWith("--")), json);
   if (command === "doctor") return doctor();
   console.log(help());

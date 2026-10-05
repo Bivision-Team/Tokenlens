@@ -50,6 +50,15 @@ node bin/tokenlens.js session ~/.claude/projects/.../session.jsonl
 node bin/tokenlens.js session <session-id> --json
 ```
 
+Analyze every main session from the last 30 days with cross-session deduplication:
+
+```sh
+node bin/tokenlens.js aggregate --since 30d
+node bin/tokenlens.js aggregate --since 30d --json
+```
+
+You can also use an explicit start date, for example `--since 2026-09-01`.
+
 Check the installation:
 
 ```sh

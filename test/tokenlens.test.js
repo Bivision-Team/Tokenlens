@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { parseJsonl, analyzeTranscript, activeChain, isSubagentTranscript } from "../src/transcript.js";
+import { parseJsonl, analyzeTranscript, activeChain, dedupeTranscriptEntries, isSubagentTranscript } from "../src/transcript.js";
 import { sanitizeHookInput } from "../src/hook.js";
 
 function assistant(uuid, parentUuid, id, usage, content) {
@@ -97,6 +97,25 @@ test("distinguishes main transcripts from nested subagent transcripts", () => {
   assert.equal(isSubagentTranscript(path.join("project", "session.jsonl")), false);
   assert.equal(isSubagentTranscript(path.join("project", "session", "subagents", "agent-123.jsonl")), true);
   assert.equal(isSubagentTranscript(path.join("project", "agent-123.jsonl")), true);
+});
+
+test("deduplicates copied transcript history before aggregate analysis", () => {
+  const copied = { type: "user", uuid: "same-uuid", timestamp: "2026-10-01T00:00:00Z", message: { content: "same" } };
+  const unique = { type: "user", uuid: "unique-uuid", timestamp: "2026-10-02T00:00:00Z", message: { content: "unique" } };
+  const deduped = dedupeTranscriptEntries([copied, { ...copied }, unique]);
+  assert.equal(deduped.length, 2);
+});
+
+test("aggregate scope includes independent branches", () => {
+  const entries = [
+    { type: "user", uuid: "root", message: { content: "root" } },
+    { type: "assistant", uuid: "left", parentUuid: "root", message: { content: "left" } },
+    { type: "assistant", uuid: "right", parentUuid: "root", message: { content: "right" } },
+    { type: "last-prompt", leafUuid: "right" }
+  ];
+  const current = analyzeTranscript(entries);
+  const aggregate = analyzeTranscript(entries, [], { scope: "all" });
+  assert.ok(aggregate.context.attributed_message_tokens > current.context.attributed_message_tokens);
 });
 
 test("hook sanitizer records measurements but no sensitive content", () => {

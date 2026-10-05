@@ -77,6 +77,29 @@ export function findTranscriptCandidates(cwd = process.cwd()) {
   return candidates.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
 }
 
+export function findAllMainTranscripts() {
+  const files = [];
+  walkFiles(path.join(os.homedir(), ".claude", "projects"), ".jsonl", files);
+  return files
+    .filter((file) => !isSubagentTranscript(file))
+    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+}
+
+export function dedupeTranscriptEntries(entries) {
+  const seen = new Set();
+  return entries.filter((entry, index) => {
+    const key = entry.uuid
+      ? `uuid:${entry.uuid}`
+      : entry.type === "assistant" && (entry.requestId || entry.message?.id)
+        ? `assistant:${entry.requestId || entry.message.id}:${entry.message?.content?.[0]?.type || index}`
+        : undefined;
+    if (!key) return true;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 export function activeChain(entries) {
   const byUuid = new Map(entries.filter((entry) => entry.uuid).map((entry) => [entry.uuid, entry]));
   const explicitLeaf = [...entries].reverse().find((entry) => entry.leafUuid)?.leafUuid;
@@ -164,8 +187,8 @@ function failedRequests(entries) {
   return [...failures.values()];
 }
 
-export function analyzeTranscript(entries, malformed = []) {
-  const chain = activeChain(entries);
+export function analyzeTranscript(entries, malformed = [], options = {}) {
+  const chain = options.scope === "all" ? entries : activeChain(entries);
   const toolUses = new Map();
   for (const entry of entries) {
     for (const block of contentBlocks(entry)) {
