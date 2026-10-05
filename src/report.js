@@ -11,15 +11,23 @@ export function renderReport(report, source) {
     "Session Token Analysis",
     "",
     `Source: ${source}`,
-    `API requests: ${report.session.requests}`,
-    `Total processed input: ${compact(report.session.processed_input)}  [exact]`,
-    `  Fresh input:       ${compact(report.session.exact_totals.input)}`,
-    `  Cache reads:       ${compact(report.session.exact_totals.cacheRead)}`,
-    `  Cache creation:    ${compact(report.session.exact_totals.cacheCreation)}`,
-    `  Model output:      ${compact(report.session.exact_totals.output)}`,
+    `Successful API requests: ${report.session.requests}`,
+    `Failed API requests: ${report.session.failed_requests.count}${report.session.failed_requests.statuses.length ? `  (status: ${report.session.failed_requests.statuses.join(", ")})` : ""}`,
+    report.session.exact_totals
+      ? `Total processed input: ${compact(report.session.processed_input)}  [exact]`
+      : "Total processed input: unavailable  [no successful usage record]",
     "",
     "Current context snapshot",
   ];
+
+  if (report.session.exact_totals) {
+    lines.splice(6, 0,
+      `  Fresh input:       ${compact(report.session.exact_totals.input)}`,
+      `  Cache reads:       ${compact(report.session.exact_totals.cacheRead)}`,
+      `  Cache creation:    ${compact(report.session.exact_totals.cacheCreation)}`,
+      `  Model output:      ${compact(report.session.exact_totals.output)}`
+    );
+  }
 
   const last = report.context.last_request_exact;
   if (last) {

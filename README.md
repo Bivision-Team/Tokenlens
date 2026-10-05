@@ -33,6 +33,12 @@ For the least intrusive report, run the CLI directly from another terminal:
 node /absolute/path/to/Tokenlens/bin/tokenlens.js current
 ```
 
+If the current session only contains a failed request (for example, a usage-limit `429`), analyze the previous successful session:
+
+```sh
+node /absolute/path/to/Tokenlens/bin/tokenlens.js previous
+```
+
 Invoking `/tokenlens:report` itself creates a small Claude turn. The standalone CLI does not.
 
 Analyze a specific transcript or session ID:

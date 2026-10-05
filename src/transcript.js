@@ -50,6 +50,25 @@ export function findTranscript(query, cwd = process.cwd()) {
   return matching[0];
 }
 
+export function findTranscriptCandidates(cwd = process.cwd()) {
+  let activeSession;
+  try {
+    const activeKey = fingerprint(path.resolve(cwd)).slice(0, 32);
+    const active = JSON.parse(fs.readFileSync(path.join(dataDir(), "active", `${activeKey}.json`), "utf8"));
+    activeSession = active.session_id;
+  } catch {}
+
+  const files = [];
+  walkFiles(path.join(os.homedir(), ".claude", "projects"), ".jsonl", files);
+  const activeFile = activeSession
+    ? files.find((file) => path.basename(file, ".jsonl") === activeSession)
+    : undefined;
+  const candidates = activeFile
+    ? files.filter((file) => path.dirname(file) === path.dirname(activeFile))
+    : files;
+  return candidates.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+}
+
 export function activeChain(entries) {
   const byUuid = new Map(entries.filter((entry) => entry.uuid).map((entry) => [entry.uuid, entry]));
   const explicitLeaf = [...entries].reverse().find((entry) => entry.leafUuid)?.leafUuid;
@@ -114,11 +133,27 @@ function uniqueRequests(entries) {
   let fallback = 0;
   for (const entry of entries) {
     const usage = usageOf(entry);
-    if (!usage) continue;
+    if (!usage || entry.isApiErrorMessage) continue;
     const key = entry.requestId || entry.message?.id || `fallback:${fallback++}`;
     if (!requests.has(key)) requests.set(key, { key, model: entry.message?.model, usage, entry });
   }
   return [...requests.values()];
+}
+
+function failedRequests(entries) {
+  const failures = new Map();
+  let fallback = 0;
+  for (const entry of entries) {
+    if (!entry.isApiErrorMessage) continue;
+    const key = entry.requestId || entry.message?.id || `fallback:${fallback++}`;
+    if (!failures.has(key)) {
+      failures.set(key, {
+        status: entry.apiErrorStatus ?? null,
+        request_id_present: Boolean(entry.requestId)
+      });
+    }
+  }
+  return [...failures.values()];
 }
 
 export function analyzeTranscript(entries, malformed = []) {
@@ -188,6 +223,7 @@ export function analyzeTranscript(entries, malformed = []) {
   repeated.sort((a, b) => b.avoidable_tokens - a.avoidable_tokens);
 
   const requests = uniqueRequests(entries);
+  const failures = failedRequests(entries);
   const lastRequest = uniqueRequests(chain).at(-1);
   const totals = requests.reduce((sum, request) => ({
     input: sum.input + request.usage.input,
@@ -205,8 +241,12 @@ export function analyzeTranscript(entries, malformed = []) {
     },
     session: {
       requests: requests.length,
-      exact_totals: totals,
-      processed_input: totals.input + totals.cacheRead + totals.cacheCreation
+      failed_requests: {
+        count: failures.length,
+        statuses: [...new Set(failures.map((failure) => failure.status).filter((status) => status !== null))]
+      },
+      exact_totals: requests.length ? totals : null,
+      processed_input: requests.length ? totals.input + totals.cacheRead + totals.cacheCreation : null
     },
     context: {
       active_entries: chain.length,
@@ -217,6 +257,9 @@ export function analyzeTranscript(entries, malformed = []) {
     repeated_reads: repeated,
     warnings: [
       ...(malformed.length ? [`Ignored ${malformed.length} malformed transcript line(s).`] : []),
+      ...(failures.length
+        ? [`Session contains ${failures.length} failed API request(s)${failures.some((failure) => failure.status === 429) ? "; status 429 means the usage limit or rate limit was reached" : ""}.`]
+        : []),
       "Per-category values are estimates; Claude Code does not expose exact additive per-message token counts.",
       "Potential savings assume the task trajectory would remain unchanged."
     ]

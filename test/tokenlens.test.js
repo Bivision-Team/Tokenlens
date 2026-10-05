@@ -66,6 +66,24 @@ test("classifies metadata separately and does not double count tool errors", () 
   assert.equal(report.context.categories["Bash / test output"], undefined);
 });
 
+test("reports API errors without presenting zero usage as an exact successful request", () => {
+  const entries = [{
+    type: "assistant",
+    uuid: "error-1",
+    requestId: "req-error",
+    isApiErrorMessage: true,
+    apiErrorStatus: 429,
+    message: { id: "msg-error", usage, content: [{ type: "text", text: "rate limited" }] }
+  }];
+  const report = analyzeTranscript(entries);
+  assert.equal(report.session.requests, 0);
+  assert.equal(report.session.failed_requests.count, 1);
+  assert.deepEqual(report.session.failed_requests.statuses, [429]);
+  assert.equal(report.session.exact_totals, null);
+  assert.equal(report.session.processed_input, null);
+  assert.match(report.warnings.join(" "), /429/);
+});
+
 test("parser tolerates a partially-written final JSONL line", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tokenlens-"));
   const file = path.join(directory, "session.jsonl");
