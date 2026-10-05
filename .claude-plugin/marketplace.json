@@ -7,10 +7,7 @@
   "plugins": [
     {
       "name": "tokenlens",
-      "source": {
-        "source": "github",
-        "repo": "Bivision-Team/Tokenlens"
-      },
+      "source": ".",
       "description": "Explain which messages, tools, files, and agents consume Claude Code context"
     }
   ]
