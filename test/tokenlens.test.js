@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { parseJsonl, analyzeTranscript, activeChain, dedupeTranscriptEntries, isSubagentTranscript } from "../src/transcript.js";
+import { parseJsonl, analyzeTranscript, activeChain, combineSessionTree, dedupeTranscriptEntries, findSubagentTranscripts, isSubagentTranscript } from "../src/transcript.js";
 import { sanitizeHookInput } from "../src/hook.js";
 
 function assistant(uuid, parentUuid, id, usage, content) {
@@ -97,6 +97,39 @@ test("distinguishes main transcripts from nested subagent transcripts", () => {
   assert.equal(isSubagentTranscript(path.join("project", "session.jsonl")), false);
   assert.equal(isSubagentTranscript(path.join("project", "session", "subagents", "agent-123.jsonl")), true);
   assert.equal(isSubagentTranscript(path.join("project", "agent-123.jsonl")), true);
+});
+
+test("discovers only subagents belonging to the selected main transcript", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tokenlens-tree-"));
+  const main = path.join(directory, "session-1.jsonl");
+  const own = path.join(directory, "session-1", "subagents");
+  const other = path.join(directory, "session-2", "subagents");
+  fs.mkdirSync(own, { recursive: true });
+  fs.mkdirSync(other, { recursive: true });
+  fs.writeFileSync(main, "");
+  fs.writeFileSync(path.join(own, "agent-a.jsonl"), "");
+  fs.writeFileSync(path.join(other, "agent-b.jsonl"), "");
+  assert.deepEqual(findSubagentTranscripts(main), [path.join(own, "agent-a.jsonl")]);
+});
+
+test("combines main and subagent usage without counting returned summaries as requests", () => {
+  const mainReport = analyzeTranscript([
+    assistant("main-a", null, "main-message", usage, [{ type: "text", text: "main" }]),
+    { type: "user", uuid: "main-b", parentUuid: "main-a", message: { content: [{ type: "tool_result", tool_use_id: "agent-tool", content: "agent summary" }] } }
+  ]);
+  const agentUsage = { ...usage, cache_read_input_tokens: 90, output_tokens: 7 };
+  const agentReport = analyzeTranscript([
+    assistant("agent-a", null, "agent-message", agentUsage, [{ type: "text", text: "agent" }])
+  ]);
+  const combined = combineSessionTree(
+    { kind: "main", id: "session-1", source: "session-1.jsonl", report: mainReport },
+    [{ kind: "agent", id: "a", source: "agent-a.jsonl", report: agentReport }]
+  );
+  assert.equal(combined.totals.requests, 2);
+  assert.equal(combined.totals.processed_input, 140);
+  assert.equal(combined.totals.exact_totals.output, 10);
+  assert.equal(combined.top_consumer.id, "a");
+  assert.equal(combined.agents[0].share_percent, 75);
 });
 
 test("deduplicates copied transcript history before aggregate analysis", () => {

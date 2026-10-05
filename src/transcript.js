@@ -85,6 +85,17 @@ export function findAllMainTranscripts() {
     .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
 }
 
+export function findSubagentTranscripts(mainTranscript) {
+  if (!mainTranscript || isSubagentTranscript(mainTranscript)) return [];
+  const sessionId = path.basename(mainTranscript, ".jsonl");
+  const root = path.join(path.dirname(mainTranscript), sessionId, "subagents");
+  const files = [];
+  walkFiles(root, ".jsonl", files);
+  return files
+    .filter((file) => isSubagentTranscript(file))
+    .sort((a, b) => a.localeCompare(b));
+}
+
 export function dedupeTranscriptEntries(entries) {
   const seen = new Set();
   return entries.filter((entry, index) => {
@@ -294,5 +305,93 @@ export function analyzeTranscript(entries, malformed = [], options = {}) {
       "Per-category values are estimates; Claude Code does not expose exact additive per-message token counts.",
       "Potential savings assume the task trajectory would remain unchanged."
     ]
+  };
+}
+
+export function combineSessionTree(main, agents = []) {
+  const members = [main, ...agents];
+  const successful = members.filter((member) => member.report.session.exact_totals);
+  const exactTotals = successful.length
+    ? successful.reduce((sum, member) => {
+        const usage = member.report.session.exact_totals;
+        sum.input += usage.input;
+        sum.cacheRead += usage.cacheRead;
+        sum.cacheCreation += usage.cacheCreation;
+        sum.output += usage.output;
+        return sum;
+      }, { input: 0, cacheRead: 0, cacheCreation: 0, output: 0 })
+    : null;
+
+  const categories = new Map();
+  for (const member of members) {
+    for (const [name, tokens] of Object.entries(member.report.context.categories)) {
+      categories.set(name, (categories.get(name) || 0) + tokens);
+    }
+  }
+
+  const ranked = [...members].sort((a, b) =>
+    (b.report.session.processed_input ?? -1) - (a.report.session.processed_input ?? -1)
+  );
+  const top = ranked[0];
+  const processedInput = exactTotals
+    ? exactTotals.input + exactTotals.cacheRead + exactTotals.cacheCreation
+    : null;
+
+  return {
+    schema_version: 1,
+    measurement_policy: main.report.measurement_policy,
+    scope: {
+      main_session_id: main.id,
+      agent_count: agents.length,
+      transcript_count: members.length
+    },
+    totals: {
+      requests: members.reduce((sum, member) => sum + member.report.session.requests, 0),
+      failed_requests: {
+        count: members.reduce((sum, member) => sum + member.report.session.failed_requests.count, 0),
+        statuses: [...new Set(members.flatMap((member) => member.report.session.failed_requests.statuses))]
+      },
+      exact_totals: exactTotals,
+      processed_input: processedInput,
+      attributed_message_tokens: [...categories.values()].reduce((sum, value) => sum + value, 0),
+      categories: Object.fromEntries([...categories.entries()].sort((a, b) => b[1] - a[1]))
+    },
+    main: sessionTreeMember(main, processedInput),
+    agents: agents.map((agent) => sessionTreeMember(agent, processedInput)),
+    top_consumer: top ? {
+      kind: top.kind,
+      id: top.id,
+      processed_input: top.report.session.processed_input,
+      share_percent: sharePercent(top.report.session.processed_input, processedInput)
+    } : null,
+    warnings: [
+      ...(members.reduce((sum, member) => sum + member.report.session.failed_requests.count, 0)
+        ? [`Session tree contains ${members.reduce((sum, member) => sum + member.report.session.failed_requests.count, 0)} failed API request(s)${members.some((member) => member.report.session.failed_requests.statuses.includes(429)) ? "; status 429 means the usage limit or rate limit was reached" : ""}.`]
+        : []),
+      ...new Set(members.flatMap((member) => member.report.warnings)
+        .filter((warning) => !warning.startsWith("Session contains "))),
+      "Combined usage sums the main transcript and its discovered subagent transcripts; returned subagent summaries are message content, not duplicate API usage.",
+      "Claude Code transcripts do not expose nested parent-agent identity, so the displayed tree attaches discovered agents directly to the main session."
+    ]
+  };
+}
+
+function sharePercent(value, total) {
+  if (value === null || value === undefined || !total) return null;
+  return Number(((value / total) * 100).toFixed(1));
+}
+
+function sessionTreeMember(member, totalProcessedInput) {
+  const report = member.report;
+  const last = report.context.last_request_exact;
+  return {
+    kind: member.kind,
+    id: member.id,
+    source: member.source,
+    usage: report.session,
+    last_request_input: last ? last.input + last.cacheRead + last.cacheCreation : null,
+    attributed_message_tokens: report.context.attributed_message_tokens,
+    categories: report.context.categories,
+    share_percent: sharePercent(report.session.processed_input, totalProcessedInput)
   };
 }

@@ -33,6 +33,18 @@ For the least intrusive report, run the CLI directly from another terminal:
 node /absolute/path/to/Tokenlens/bin/tokenlens.js current
 ```
 
+Include every subagent transcript spawned by the current session, with combined
+exact usage, per-agent breakdown, the largest consumer, and a session tree:
+
+```sh
+node /absolute/path/to/Tokenlens/bin/tokenlens.js current --include-agents
+node /absolute/path/to/Tokenlens/bin/tokenlens.js current --include-agents --json
+```
+
+The normal `current` report counts only the main transcript. Its `Subagent
+output` category measures the summary returned to the main session, not the
+subagent's internal API usage. Use `--include-agents` for the complete cost.
+
 If the current session only contains a failed request (for example, a usage-limit `429`), analyze the previous successful session:
 
 ```sh
@@ -87,6 +99,6 @@ See [docs/privacy.md](docs/privacy.md) and [docs/accuracy.md](docs/accuracy.md).
 
 ## Current scope
 
-v0.1 supports current-context category estimates, exact cumulative request totals, cache breakdown, branch-aware transcript analysis, subagent-aware collection metadata, repeated unchanged read detection, terminal output, and JSON output.
+v0.3 supports current-context category estimates, exact cumulative request totals, cache breakdown, branch-aware transcript analysis, optional main-plus-subagent session-tree totals, repeated unchanged read detection, period aggregation, terminal output, and JSON output.
 
 Live OTLP ingestion, provider billing reconciliation, and behavior-changing optimizations are intentionally outside this first milestone.

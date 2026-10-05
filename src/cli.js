@@ -1,14 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
-import { findTranscript, findTranscriptCandidates, findAllMainTranscripts, dedupeTranscriptEntries, parseJsonl, analyzeTranscript } from "./transcript.js";
-import { renderReport, renderAggregateReport } from "./report.js";
+import { findTranscript, findTranscriptCandidates, findAllMainTranscripts, findSubagentTranscripts, dedupeTranscriptEntries, parseJsonl, analyzeTranscript, combineSessionTree } from "./transcript.js";
+import { renderReport, renderAggregateReport, renderSessionTreeReport } from "./report.js";
 import { dataDir } from "./privacy.js";
 
 function help() {
-  return `TokenLens v0.1.0
+  return `TokenLens v0.3.0
 
 Usage:
-  tokenlens current [--json]
+  tokenlens current [--include-agents] [--json]
   tokenlens previous [--json]
   tokenlens aggregate [--since 30d|YYYY-MM-DD] [--json]
   tokenlens session <session-id|transcript-path> [--json]
@@ -26,6 +26,38 @@ async function analyze(query, json) {
   const report = analyzeTranscript(entries, malformed);
   report.source = { transcript: path.basename(transcript), content_stored_by_tokenlens: false };
   console.log(json ? JSON.stringify(report, null, 2) : renderReport(report, path.basename(transcript)));
+}
+
+async function analyzeWithAgents(query, json) {
+  const transcript = findTranscript(query);
+  if (!transcript) {
+    throw new Error("No Claude Code transcript found. Start a Claude session with the TokenLens plugin enabled.");
+  }
+
+  const parsedMain = await parseJsonl(transcript);
+  const mainId = path.basename(transcript, ".jsonl");
+  const main = {
+    kind: "main",
+    id: mainId,
+    source: path.basename(transcript),
+    report: analyzeTranscript(parsedMain.entries, parsedMain.malformed)
+  };
+  const agents = [];
+  for (const file of findSubagentTranscripts(transcript)) {
+    const parsed = await parseJsonl(file);
+    const id = parsed.entries.find((entry) => entry.agentId)?.agentId
+      || path.basename(file, ".jsonl").replace(/^agent-/i, "");
+    agents.push({
+      kind: "agent",
+      id,
+      source: path.basename(file),
+      report: analyzeTranscript(parsed.entries, parsed.malformed)
+    });
+  }
+
+  const report = combineSessionTree(main, agents);
+  report.source = { transcript: path.basename(transcript), content_stored_by_tokenlens: false };
+  console.log(json ? JSON.stringify(report, null, 2) : renderSessionTreeReport(report));
 }
 
 async function analyzePrevious(json) {
@@ -110,6 +142,7 @@ function doctor() {
 export async function main(args) {
   const command = args[0] || "help";
   const json = args.includes("--json");
+  if (command === "current" && args.includes("--include-agents")) return analyzeWithAgents(undefined, json);
   if (command === "current") return analyze(undefined, json);
   if (command === "previous") return analyzePrevious(json);
   if (command === "aggregate") return analyzeAggregate(args.slice(1), json);

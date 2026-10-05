@@ -88,3 +88,61 @@ export function renderAggregateReport(report) {
   for (const warning of report.warnings) lines.push(`  - ${warning}`);
   return lines.join("\n");
 }
+
+export function renderSessionTreeReport(report) {
+  const usage = report.totals;
+  const lines = [
+    "TokenLens Session Tree Analysis",
+    "",
+    `Main session: ${report.scope.main_session_id}`,
+    `Subagents: ${report.scope.agent_count}`,
+    `Transcripts: ${report.scope.transcript_count}`,
+    `Successful API requests: ${usage.requests}`,
+    `Failed API requests: ${usage.failed_requests.count}${usage.failed_requests.statuses.length ? `  (status: ${usage.failed_requests.statuses.join(", ")})` : ""}`,
+    usage.exact_totals
+      ? `Combined processed input: ${compact(usage.processed_input)}  [exact]`
+      : "Combined processed input: unavailable  [no successful usage record]"
+  ];
+
+  if (usage.exact_totals) {
+    lines.push(
+      `  Fresh input:       ${compact(usage.exact_totals.input)}`,
+      `  Cache reads:       ${compact(usage.exact_totals.cacheRead)}`,
+      `  Cache creation:    ${compact(usage.exact_totals.cacheCreation)}`,
+      `  Model output:      ${compact(usage.exact_totals.output)}`
+    );
+  }
+
+  lines.push("", `Combined attributed messages: ~${compact(usage.attributed_message_tokens)}  [estimated]`);
+  for (const [name, tokens] of Object.entries(usage.categories)) {
+    lines.push(`  ${name.padEnd(24)} ~${compact(tokens)}`);
+  }
+
+  lines.push("", "Usage breakdown");
+  for (const member of [report.main, ...report.agents]) {
+    const label = member.kind === "main" ? "main " : "agent";
+    const share = member.share_percent === null ? "n/a" : `${member.share_percent.toFixed(1)}%`;
+    lines.push(
+      `  ${label} ${member.id}  ${member.usage.requests} requests  ${compact(member.usage.processed_input)} processed  ${share}`,
+      `       last request ${compact(member.last_request_input)}  attributed ~${compact(member.attributed_message_tokens)}`
+    );
+  }
+
+  if (report.top_consumer) {
+    const topShare = report.top_consumer.share_percent === null ? "n/a" : `${report.top_consumer.share_percent.toFixed(1)}%`;
+    lines.push(
+      "",
+      `Largest consumer: ${report.top_consumer.kind} ${report.top_consumer.id}  ${compact(report.top_consumer.processed_input)}  (${topShare})`
+    );
+  }
+
+  lines.push("", "Session tree", `  ${report.main.id}  [main]`);
+  report.agents.forEach((agent, index) => {
+    lines.push(`  ${index === report.agents.length - 1 ? "└─" : "├─"} ${agent.id}  [agent]`);
+  });
+  if (!report.agents.length) lines.push("  └─ No subagent transcripts found");
+
+  lines.push("", "Accuracy notes");
+  for (const warning of report.warnings) lines.push(`  - ${warning}`);
+  return lines.join("\n");
+}

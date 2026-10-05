@@ -1,6 +1,6 @@
 ---
 description: Analyze the current Claude Code session's context and cumulative token usage
-argument-hint: "[--json]"
+argument-hint: "[--include-agents] [--json]"
 allowed-tools: Bash(node *)
 ---
 

@@ -1,6 +1,6 @@
 {
   "name": "@bivision/tokenlens",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Privacy-first token attribution for Claude Code sessions",
   "type": "module",
   "bin": {
