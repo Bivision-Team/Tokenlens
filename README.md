@@ -1,0 +1,75 @@
+# TokenLens
+
+TokenLens explains what occupies the **Messages** portion of a Claude Code session and what drove cumulative token processing.
+
+The v0.1 MVP is local-first, analysis-only, and stores no source code, prompts, assistant text, shell commands, or tool output by default.
+
+## Try it now
+
+For development or an immediate local trial, clone the repository and start Claude Code with the plugin directory:
+
+```sh
+claude --plugin-dir /absolute/path/to/Tokenlens
+```
+
+Inside Claude Code:
+
+```text
+/tokenlens:report
+```
+
+After the first version is pushed to GitHub, install it persistently through its marketplace:
+
+```sh
+claude plugin marketplace add Bivision-Team/Tokenlens
+claude plugin install tokenlens@tokenlens
+```
+
+Restart Claude Code after installation, then run `/tokenlens:report`. Claude Code namespaces plugin commands as `<plugin>:<command>` to avoid collisions.
+
+For the least intrusive report, run the CLI directly from another terminal:
+
+```sh
+node /absolute/path/to/Tokenlens/bin/tokenlens.js current
+```
+
+Invoking `/tokenlens:report` itself creates a small Claude turn. The standalone CLI does not.
+
+Analyze a specific transcript or session ID:
+
+```sh
+node bin/tokenlens.js session ~/.claude/projects/.../session.jsonl
+node bin/tokenlens.js session <session-id> --json
+```
+
+Check the installation:
+
+```sh
+node bin/tokenlens.js doctor
+claude plugin validate --strict .
+```
+
+## What the report means
+
+- API request input, output, cache-read, and cache-creation totals come from Claude Code transcript usage and are marked **exact**.
+- Message-category and per-file values are local estimates. Claude Code does not expose exact additive token counts for each message component.
+- Repeated-read savings are heuristic counterfactuals, not guaranteed savings.
+- Reported costs, when added, will be API-equivalent estimates and may not equal subscription charges or provider invoices.
+
+## Privacy
+
+Hook payloads may contain sensitive content. TokenLens measures that content transiently, creates an installation-keyed HMAC, and persists only sizes, estimates, safe structural metadata, and fingerprints under `~/.tokenlens`.
+
+Default behavior is equivalent to:
+
+```text
+store_content=false
+```
+
+See [docs/privacy.md](docs/privacy.md) and [docs/accuracy.md](docs/accuracy.md).
+
+## Current scope
+
+v0.1 supports current-context category estimates, exact cumulative request totals, cache breakdown, branch-aware transcript analysis, subagent-aware collection metadata, repeated unchanged read detection, terminal output, and JSON output.
+
+Live OTLP ingestion, provider billing reconciliation, and behavior-changing optimizations are intentionally outside this first milestone.

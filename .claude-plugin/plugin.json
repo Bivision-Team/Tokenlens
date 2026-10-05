@@ -1,0 +1,12 @@
+{
+  "name": "tokenlens",
+  "displayName": "TokenLens",
+  "version": "0.1.0",
+  "description": "Explain which messages, tools, files, and agents consume Claude Code context.",
+  "author": {
+    "name": "Bivision Team"
+  },
+  "repository": "https://github.com/Bivision-Team/Tokenlens",
+  "license": "MIT",
+  "keywords": ["tokens", "context", "observability", "privacy"]
+}

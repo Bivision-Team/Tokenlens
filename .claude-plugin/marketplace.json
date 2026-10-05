@@ -1,0 +1,17 @@
+{
+  "name": "tokenlens",
+  "description": "Privacy-first token attribution tools for Claude Code",
+  "owner": {
+    "name": "Bivision Team"
+  },
+  "plugins": [
+    {
+      "name": "tokenlens",
+      "source": {
+        "source": "github",
+        "repo": "Bivision-Team/Tokenlens"
+      },
+      "description": "Explain which messages, tools, files, and agents consume Claude Code context"
+    }
+  ]
+}
