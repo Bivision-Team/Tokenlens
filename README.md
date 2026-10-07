@@ -69,6 +69,13 @@ node bin/tokenlens.js aggregate --since 30d
 node bin/tokenlens.js aggregate --since 30d --json
 ```
 
+Include subagents and label the export for team rollups:
+
+```sh
+node bin/tokenlens.js aggregate --since 30d --include-agents --person "Dato" --project "Pulse" --json > dato-pulse.json
+node bin/tokenlens.js team dato-pulse.json inga-pulse.json
+```
+
 You can also use an explicit start date, for example `--since 2026-09-01`.
 
 Check the installation:
@@ -82,6 +89,8 @@ claude plugin validate --strict .
 
 - API request input, output, cache-read, and cache-creation totals come from Claude Code transcript usage and are marked **exact**.
 - Message-category and per-file values are local estimates. Claude Code does not expose exact additive token counts for each message component.
+- Reports show both unique message content and estimated cumulative exposure across requests, plus fixed overhead, unexplained remainder, and coverage.
+- API-equivalent input uses normalized multipliers (fresh input 1x, standard 5-minute cache write 1.25x, cache read 0.1x). It is not a subscription charge or invoice.
 - Repeated-read savings are heuristic counterfactuals, not guaranteed savings.
 - Reported costs, when added, will be API-equivalent estimates and may not equal subscription charges or provider invoices.
 
@@ -99,6 +108,6 @@ See [docs/privacy.md](docs/privacy.md) and [docs/accuracy.md](docs/accuracy.md).
 
 ## Current scope
 
-v0.3 supports current-context category estimates, exact cumulative request totals, cache breakdown, branch-aware transcript analysis, optional main-plus-subagent session-tree totals, repeated unchanged read detection, period aggregation, terminal output, and JSON output.
+v0.4 supports unique and cumulative context attribution, coverage and fixed-overhead estimates, exact request totals, API-equivalent input weighting, named subagent types, team JSON rollups, threshold-based actions, retention-limited hook metadata, repeated-read detection, period aggregation, terminal output, and JSON output.
 
 Live OTLP ingestion, provider billing reconciliation, and behavior-changing optimizations are intentionally outside this first milestone.

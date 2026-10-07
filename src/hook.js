@@ -3,6 +3,43 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { dataDir, fingerprint, measurement, safePath, writeJsonAtomic } from "./privacy.js";
 
+export function pruneEvents(now = Date.now()) {
+  const configured = Number(process.env.TOKENLENS_RETENTION_DAYS || 30);
+  const retentionDays = Number.isFinite(configured) && configured >= 1 ? configured : 30;
+  const root = path.join(dataDir(), "sessions");
+  if (!fs.existsSync(root)) return 0;
+  const cutoff = now - retentionDays * 86_400_000;
+  let removed = 0;
+  for (const session of fs.readdirSync(root, { withFileTypes: true })) {
+    if (!session.isDirectory()) continue;
+    const events = path.join(root, session.name, "events");
+    if (!fs.existsSync(events)) continue;
+    for (const item of fs.readdirSync(events, { withFileTypes: true })) {
+      if (!item.isFile() || !item.name.endsWith(".json")) continue;
+      const file = path.join(events, item.name);
+      if (fs.statSync(file).mtimeMs < cutoff) {
+        fs.unlinkSync(file);
+        removed += 1;
+      }
+    }
+  }
+  return removed;
+}
+
+export function readAgentTypes(sessionId) {
+  const directory = path.join(dataDir(), "sessions", String(sessionId), "events");
+  const types = new Map();
+  if (!fs.existsSync(directory)) return types;
+  for (const item of fs.readdirSync(directory, { withFileTypes: true })) {
+    if (!item.isFile() || !item.name.endsWith(".json")) continue;
+    try {
+      const event = JSON.parse(fs.readFileSync(path.join(directory, item.name), "utf8"));
+      if (event.agent_id && event.agent_type) types.set(String(event.agent_id), String(event.agent_type));
+    } catch {}
+  }
+  return types;
+}
+
 async function readStdin() {
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
@@ -71,6 +108,7 @@ export async function runHook() {
   }
 
   const event = sanitizeHookInput(input);
+  if (input.hook_event_name === "SessionStart") pruneEvents();
   const session = String(input.session_id || "unknown").replace(/[^a-zA-Z0-9._-]/g, "_");
   const directory = path.join(dataDir(), "sessions", session, "events");
   fs.mkdirSync(directory, { recursive: true });

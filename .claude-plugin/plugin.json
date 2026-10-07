@@ -1,7 +1,7 @@
 {
   "name": "tokenlens",
   "displayName": "TokenLens",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Explain which messages, tools, files, and agents consume Claude Code context.",
   "author": {
     "name": "Bivision Team"

@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { parseJsonl, analyzeTranscript, activeChain, combineSessionTree, dedupeTranscriptEntries, findSubagentTranscripts, isSubagentTranscript } from "../src/transcript.js";
-import { sanitizeHookInput } from "../src/hook.js";
+import { parseJsonl, analyzeTranscript, activeChain, apiEquivalent, combineSessionTree, dedupeTranscriptEntries, findSubagentTranscripts, isSubagentTranscript } from "../src/transcript.js";
+import { pruneEvents, readAgentTypes, sanitizeHookInput } from "../src/hook.js";
+import { buildTeamReport } from "../src/cli.js";
 
 function assistant(uuid, parentUuid, id, usage, content) {
   return {
@@ -31,6 +32,28 @@ test("deduplicates usage repeated across assistant content entries", () => {
   assert.equal(report.session.exact_totals.output, 3);
 });
 
+test("reports unique and cumulative attribution without forcing reconciliation", () => {
+  const first = { input_tokens: 100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 2 };
+  const second = { input_tokens: 0, cache_read_input_tokens: 120, cache_creation_input_tokens: 0, output_tokens: 2 };
+  const report = analyzeTranscript([
+    { type: "user", uuid: "u1", message: { content: "hello" } },
+    assistant("a1", "u1", "m1", first, [{ type: "text", text: "answer" }]),
+    { type: "user", uuid: "u2", parentUuid: "a1", message: { content: "next" } },
+    assistant("a2", "u2", "m2", second, [{ type: "text", text: "done" }])
+  ]);
+  assert.equal(report.session.processed_input, 220);
+  assert.ok(report.context.cumulative.categories["User prompts"] > report.context.categories["User prompts"]);
+  assert.ok(report.context.cumulative.fixed_overhead > 0);
+  assert.equal(typeof report.context.cumulative.unattributed, "number");
+  assert.equal(typeof report.context.cumulative.coverage_percent, "number");
+});
+
+test("computes normalized API-equivalent input weights", () => {
+  const result = apiEquivalent({ input: 100, cacheRead: 1000, cacheCreation: 100, output: 999 });
+  assert.equal(result.input_units, 325);
+  assert.equal(result.excludes_output, true);
+});
+
 test("finds repeated unchanged reads and does not persist their content", () => {
   const entries = [
     assistant("a", null, "m1", usage, [{ type: "tool_use", id: "t1", name: "Read", input: { file_path: "src/A.ts" } }]),
@@ -42,6 +65,20 @@ test("finds repeated unchanged reads and does not persist their content", () => 
   assert.equal(report.repeated_reads.length, 1);
   assert.equal(report.repeated_reads[0].occurrences, 2);
   assert.doesNotMatch(JSON.stringify(report), /SECRET SOURCE/);
+});
+
+test("detects repeated command loops without exposing command text", () => {
+  const entries = [];
+  for (let index = 0; index < 3; index += 1) {
+    entries.push(assistant(`a${index}`, index ? `u${index}` : null, `m${index}`, usage, [{
+      type: "tool_use", id: `t${index}`, name: "Bash", input: { command: "SECRET RETRY COMMAND" }
+    }]));
+    entries.push({ type: "user", uuid: `u${index + 1}`, parentUuid: `a${index}`, message: { content: "continue" } });
+  }
+  const report = analyzeTranscript(entries);
+  assert.equal(report.repeated_commands[0].occurrences, 3);
+  assert.match(report.recommendations.map((item) => item.rule).join(" "), /repeated-command-loop/);
+  assert.doesNotMatch(JSON.stringify(report.repeated_commands), /SECRET RETRY COMMAND/);
 });
 
 test("active chain ignores abandoned branches", () => {
@@ -169,4 +206,44 @@ test("hook sanitizer records measurements but no sensitive content", () => {
   assert.doesNotMatch(serialized, /TOP SECRET|Authorization|curl|example\.com/);
   assert.equal(result.content_stored, false);
   assert.ok(result.prompt.estimated_tokens > 0);
+});
+
+test("reads agent types from privacy-safe hook metadata", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tokenlens-agent-types-"));
+  process.env.TOKENLENS_DATA_DIR = root;
+  const directory = path.join(root, "sessions", "s1", "events");
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, "event.json"), JSON.stringify({ agent_id: "a1", agent_type: "Explore", content_stored: false }));
+  assert.equal(readAgentTypes("s1").get("a1"), "Explore");
+});
+
+test("prunes expired hook events and preserves current metadata", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tokenlens-retention-"));
+  process.env.TOKENLENS_DATA_DIR = root;
+  process.env.TOKENLENS_RETENTION_DAYS = "30";
+  const directory = path.join(root, "sessions", "s1", "events");
+  fs.mkdirSync(directory, { recursive: true });
+  const oldFile = path.join(directory, "old.json");
+  const newFile = path.join(directory, "new.json");
+  fs.writeFileSync(oldFile, "{}");
+  fs.writeFileSync(newFile, "{}");
+  const now = Date.now();
+  fs.utimesSync(oldFile, new Date(now - 31 * 86_400_000), new Date(now - 31 * 86_400_000));
+  assert.equal(pruneEvents(now), 1);
+  assert.equal(fs.existsSync(oldFile), false);
+  assert.equal(fs.existsSync(newFile), true);
+});
+
+test("merges aggregate JSON into person-project-agent rows", () => {
+  const exact = { input: 10, cacheRead: 90, cacheCreation: 0, output: 2 };
+  const agent = { requests: 1, failed_requests: 0, exact_totals: exact, processed_input: 100, api_equivalent: apiEquivalent(exact) };
+  const report = buildTeamReport([{ source: "fallback.json", report: {
+    period: { since: "2026-10-01", until: "2026-10-02" },
+    identity: { person: "Dato", project: "Pulse" },
+    usage: { requests: 3, failed_requests: { count: 0 }, exact_totals: { input: 30, cacheRead: 270, cacheCreation: 0, output: 6 } },
+    agents_by_type: { Explore: agent }
+  } }]);
+  assert.equal(report.rows.length, 2);
+  assert.deepEqual(report.rows.map((row) => row.agent_type), ["main", "Explore"]);
+  assert.equal(report.rows[0].processed_input, 200);
 });

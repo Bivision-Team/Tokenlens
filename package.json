@@ -1,13 +1,13 @@
 {
   "name": "@bivision/tokenlens",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Privacy-first token attribution for Claude Code sessions",
   "type": "module",
   "bin": {
     "tokenlens": "./bin/tokenlens.js"
   },
   "scripts": {
-    "test": "node --test --test-isolation=none",
+    "test": "node test/tokenlens.test.js",
     "check": "node --check src/cli.js && node --check src/hook.js && node --check src/transcript.js && node --check src/report.js",
     "smoke": "node ./bin/tokenlens.js doctor"
   },

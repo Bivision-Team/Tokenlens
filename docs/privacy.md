@@ -8,4 +8,6 @@ They must not contain source text, prompts, assistant responses, tool output, ra
 
 Absolute paths outside the working directory are replaced with keyed fingerprints. The active-session index stores only a session ID under a working-directory HMAC; it does not store the working directory or transcript path. HMAC keys are generated locally under `~/.tokenlens/key`.
 
+Hook event files are retained for 30 days by default and pruned on `SessionStart`. Set `TOKENLENS_RETENTION_DAYS` to a positive whole-day retention period. Reports need hook metadata only to resolve agent types and the active session.
+
 Claude Code itself stores session transcripts independently. TokenLens reads those transcripts but does not copy their content into its event store or reports.
