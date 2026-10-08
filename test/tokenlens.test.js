@@ -4,8 +4,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseJsonl, analyzeTranscript, activeChain, apiEquivalent, combineSessionTree, dedupeTranscriptEntries, findSubagentTranscripts, isSubagentTranscript } from "../src/transcript.js";
-import { pruneEvents, readAgentTypes, sanitizeHookInput } from "../src/hook.js";
+import { pruneEvents, readAgentTypeFromMeta, readAgentTypes, resolveAgentType, sanitizeHookInput } from "../src/hook.js";
 import { buildTeamReport } from "../src/cli.js";
+import { estimateTokens } from "../src/privacy.js";
+import { renderReport } from "../src/report.js";
 
 function assistant(uuid, parentUuid, id, usage, content) {
   return {
@@ -32,7 +34,7 @@ test("deduplicates usage repeated across assistant content entries", () => {
   assert.equal(report.session.exact_totals.output, 3);
 });
 
-test("reports unique and cumulative attribution without forcing reconciliation", () => {
+test("fresh session splits processed input exactly into first-request baseline and growth", () => {
   const first = { input_tokens: 100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 2 };
   const second = { input_tokens: 0, cache_read_input_tokens: 120, cache_creation_input_tokens: 0, output_tokens: 2 };
   const report = analyzeTranscript([
@@ -43,9 +45,167 @@ test("reports unique and cumulative attribution without forcing reconciliation",
   ]);
   assert.equal(report.session.processed_input, 220);
   assert.ok(report.context.cumulative.categories["User prompts"] > report.context.categories["User prompts"]);
-  assert.ok(report.context.cumulative.fixed_overhead > 0);
-  assert.equal(typeof report.context.cumulative.unattributed, "number");
-  assert.equal(typeof report.context.cumulative.coverage_percent, "number");
+  assert.equal(report.context.cumulative.fixed_overhead_method, "first_nonzero_request_floor_minus_visible");
+  assert.equal(report.context.cumulative.fixed_overhead + report.context.cumulative.conversation_growth, 220);
+  assert.equal(typeof report.context.cumulative.growth_residual, "number");
+  assert.equal(typeof report.context.cumulative.growth_coverage_percent, "number");
+  assert.equal(report.context.cumulative.coverage_percent, undefined);
+});
+
+test("human report uses the honest decomposition labels and flags weak growth coverage", () => {
+  const prompt = "hello";
+  const report = analyzeTranscript([
+    { type: "user", uuid: "label-u1", message: { content: prompt } },
+    assistant("label-a1", "label-u1", "label-m1", { input_tokens: 100, output_tokens: 1 }, [{ type: "text", text: "answer" }]),
+    assistant("label-a2", "label-a1", "label-m2", { cache_read_input_tokens: 300, output_tokens: 1 }, [{ type: "text", text: "done" }])
+  ]);
+  const rendered = renderReport(report, "fixture.jsonl");
+  assert.match(rendered, /Measured fixed baseline \(first-request floor\)/);
+  assert.match(rendered, /Conversation growth/);
+  assert.match(rendered, /Growth coverage:.*LOW CONFIDENCE/);
+});
+
+test("request input below the segment baseline remains a non-negative exact split", () => {
+  const prompt = "hello";
+  const firstInput = 100 + estimateTokens(prompt);
+  const report = analyzeTranscript([
+    { type: "user", uuid: "floor-u1", message: { content: prompt } },
+    assistant("floor-a1", "floor-u1", "floor-m1", { input_tokens: firstInput, output_tokens: 1 }, [{ type: "text", text: "answer" }]),
+    assistant("floor-a2", "floor-a1", "floor-m2", { cache_read_input_tokens: 50, output_tokens: 1 }, [{ type: "text", text: "answer" }])
+  ]);
+  const cumulative = report.context.cumulative;
+  assert.equal(cumulative.fixed_overhead, 150);
+  assert.equal(cumulative.conversation_growth, estimateTokens(prompt));
+  assert.equal(cumulative.fixed_overhead + cumulative.conversation_growth, report.session.processed_input);
+  assert.ok(cumulative.fixed_overhead >= 0);
+  assert.ok(cumulative.conversation_growth >= 0);
+});
+
+test("keep-all thinking models use recorded output tokens for assistant growth exposure", () => {
+  const first = assistant("thinking-a1", "thinking-u1", "thinking-m1", { input_tokens: 100, output_tokens: 80 }, [
+    { type: "thinking", thinking: "short summary", signature: "opaque" },
+    { type: "text", text: "visible" }
+  ]);
+  first.message.model = "claude-opus-5-5";
+  const second = assistant("thinking-a2", "thinking-a1", "thinking-m2", { cache_read_input_tokens: 220, output_tokens: 1 }, [{ type: "text", text: "done" }]);
+  second.message.model = "claude-opus-5-5";
+  const report = analyzeTranscript([
+    { type: "user", uuid: "thinking-u1", message: { content: "prompt" } },
+    first,
+    second
+  ]);
+  assert.ok(report.context.cumulative.categories["Assistant responses"] >= 80);
+});
+
+test("resumed transcript subtracts visible history from the first non-zero request floor", () => {
+  const history = "previous conversation context";
+  const prompt = "continue the task";
+  const visible = estimateTokens(history) + estimateTokens(prompt);
+  const report = analyzeTranscript([
+    { type: "assistant", uuid: "history", message: { content: history } },
+    { type: "user", uuid: "u1", parentUuid: "history", message: { content: prompt } },
+    assistant("a1", "u1", "m1", { input_tokens: 1000 + visible, output_tokens: 2 }, [{ type: "text", text: "answer" }])
+  ]);
+  assert.equal(report.context.cumulative.baseline_per_request, 1000);
+  assert.equal(report.context.cumulative.fixed_overhead, 1000);
+  assert.equal(report.context.cumulative.conversation_growth, visible);
+  assert.equal(report.context.cumulative.fixed_overhead + report.context.cumulative.conversation_growth, report.session.processed_input);
+});
+
+test("mid-session compact starts a new independently measured baseline segment", () => {
+  const before = "first prompt";
+  const summary = "compact summary";
+  const firstInput = 1000 + estimateTokens(before);
+  const secondInput = 1100;
+  const compactInput = 700 + estimateTokens(summary);
+  const report = analyzeTranscript([
+    { type: "user", uuid: "u1", message: { content: before } },
+    assistant("a1", "u1", "m1", { input_tokens: firstInput, output_tokens: 2 }, [{ type: "text", text: "answer" }]),
+    { type: "user", uuid: "u2", parentUuid: "a1", message: { content: "more" } },
+    assistant("a2", "u2", "m2", { cache_read_input_tokens: secondInput, output_tokens: 2 }, [{ type: "text", text: "done" }]),
+    { type: "system", uuid: "compact", subtype: "compact_boundary" },
+    { type: "user", uuid: "summary", parentUuid: "compact", isMeta: true, message: { content: summary } },
+    assistant("a3", "summary", "m3", { cache_creation_input_tokens: compactInput, output_tokens: 2 }, [{ type: "text", text: "continued" }])
+  ]);
+  const cumulative = report.context.cumulative;
+  assert.equal(cumulative.segments.length, 2);
+  assert.deepEqual(cumulative.segments.map((item) => item.baseline_per_request), [1000, 700]);
+  assert.equal(cumulative.fixed_overhead + cumulative.conversation_growth, report.session.processed_input);
+  for (const segment of cumulative.segments) {
+    assert.equal(segment.fixed_overhead + segment.conversation_growth, segment.processed_input);
+    assert.ok(segment.fixed_overhead >= 0);
+    assert.ok(segment.conversation_growth >= 0);
+  }
+});
+
+test("subagent transcript keeps the exact baseline-growth invariant", () => {
+  const prompt = "inspect one bounded component";
+  const firstInput = 500 + estimateTokens(prompt);
+  const report = analyzeTranscript([
+    { type: "user", uuid: "agent-u1", agentId: "a1", message: { content: prompt } },
+    { ...assistant("agent-a1", "agent-u1", "agent-m1", { input_tokens: firstInput, output_tokens: 1 }, [{ type: "text", text: "result" }]), agentId: "a1" },
+    { type: "user", uuid: "agent-u2", parentUuid: "agent-a1", agentId: "a1", message: { content: "verify" } },
+    { ...assistant("agent-a2", "agent-u2", "agent-m2", { cache_read_input_tokens: 650, output_tokens: 1 }, [{ type: "text", text: "verified" }]), agentId: "a1" }
+  ]);
+  assert.equal(report.context.cumulative.fixed_overhead + report.context.cumulative.conversation_growth, report.session.processed_input);
+  assert.equal(report.context.cumulative.baseline_per_request, 500);
+});
+
+test("entries missing session identity stay with the transcript's sole known session", () => {
+  const report = analyzeTranscript([
+    { type: "user", uuid: "identity-u1", message: { content: "prompt" } },
+    { ...assistant("identity-a1", "identity-u1", "identity-m1", { input_tokens: 100, output_tokens: 1 }, [{ type: "text", text: "answer" }]), sessionId: "session-1" }
+  ]);
+  assert.equal(report.context.cumulative.transcript_groups, 1);
+  assert.equal(report.context.cumulative.fixed_overhead + report.context.cumulative.conversation_growth, 100);
+});
+
+test("very large first prompt is growth and cannot trigger fixed-overhead-high", () => {
+  const prompt = "x".repeat(600_000);
+  const visible = estimateTokens(prompt);
+  const report = analyzeTranscript([
+    { type: "user", uuid: "large-u1", message: { content: prompt } },
+    assistant("large-a1", "large-u1", "large-m1", { input_tokens: 50_000 + visible, output_tokens: 1 }, [{ type: "text", text: "ok" }])
+  ]);
+  assert.equal(report.context.cumulative.baseline_per_request, 50_000);
+  assert.equal(report.context.cumulative.conversation_growth, visible);
+  assert.equal(report.context.cumulative.fixed_overhead + report.context.cumulative.conversation_growth, report.session.processed_input);
+  assert.equal(report.recommendations.some((item) => item.rule === "fixed-overhead-high"), false);
+});
+
+test("fixed-overhead-high uses an absolute measured baseline threshold", () => {
+  const prompt = "small prompt";
+  const visible = estimateTokens(prompt);
+  const report = analyzeTranscript([
+    { type: "user", uuid: "fixed-u1", message: { content: prompt } },
+    assistant("fixed-a1", "fixed-u1", "fixed-m1", { input_tokens: 75_000 + visible, output_tokens: 1 }, [{ type: "text", text: "ok" }])
+  ]);
+  const recommendation = report.recommendations.find((item) => item.rule === "fixed-overhead-high");
+  assert.equal(recommendation.threshold, ">=75k measured baseline/request");
+  assert.equal(recommendation.observed, 75_000);
+});
+
+test("partial-period analysis suppresses fixed-baseline recommendations", () => {
+  const prompt = "small prompt";
+  const visible = estimateTokens(prompt);
+  const report = analyzeTranscript([
+    { type: "user", uuid: "partial-u1", message: { content: prompt } },
+    assistant("partial-a1", "partial-u1", "partial-m1", { input_tokens: 90_000 + visible, output_tokens: 1 }, [{ type: "text", text: "ok" }])
+  ], [], { scope: "all", baselineScopeComplete: false });
+  assert.equal(report.context.cumulative.baseline_scope_complete, false);
+  assert.equal(report.recommendations.some((item) => item.rule === "fixed-overhead-high"), false);
+  assert.match(report.warnings.join(" "), /recommendations are suppressed/);
+});
+
+test("growth coverage can fail and is reported as low confidence", () => {
+  const prompt = "tiny";
+  const report = analyzeTranscript([
+    { type: "user", uuid: "low-u1", message: { content: prompt } },
+    assistant("low-a1", "low-u1", "low-m1", { input_tokens: 1000 + estimateTokens(prompt), output_tokens: 1 }, [{ type: "text", text: "ok" }]),
+    assistant("low-a2", "low-a1", "low-m2", { cache_read_input_tokens: 5000, output_tokens: 1 }, [{ type: "text", text: "ok" }])
+  ]);
+  assert.ok(report.context.cumulative.growth_coverage_percent < 70);
+  assert.match(report.warnings.join(" "), /low confidence below 70%/);
 });
 
 test("computes normalized API-equivalent input weights", () => {
@@ -215,6 +375,22 @@ test("reads agent types from privacy-safe hook metadata", () => {
   fs.mkdirSync(directory, { recursive: true });
   fs.writeFileSync(path.join(directory, "event.json"), JSON.stringify({ agent_id: "a1", agent_type: "Explore", content_stored: false }));
   assert.equal(readAgentTypes("s1").get("a1"), "Explore");
+});
+
+test("falls back to subagent meta type while hook metadata keeps precedence", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tokenlens-agent-meta-"));
+  const transcript = path.join(directory, "agent-a1.jsonl");
+  fs.writeFileSync(transcript, "");
+  fs.writeFileSync(path.join(directory, "agent-a1.meta.json"), JSON.stringify({
+    agentType: "claude-code-guide",
+    description: "PRIVATE DESCRIPTION MUST NOT BE RETURNED"
+  }));
+  assert.equal(readAgentTypeFromMeta(transcript), "claude-code-guide");
+  assert.equal(resolveAgentType(new Map(), "a1", transcript), "claude-code-guide");
+  assert.equal(resolveAgentType(new Map([["a1", "Explore"]]), "a1", transcript), "Explore");
+  assert.doesNotMatch(JSON.stringify({ agent_type: resolveAgentType(new Map(), "a1", transcript) }), /PRIVATE DESCRIPTION/);
+  fs.writeFileSync(path.join(directory, "agent-a1.meta.json"), "{broken");
+  assert.equal(readAgentTypeFromMeta(transcript), undefined);
 });
 
 test("prunes expired hook events and preserves current metadata", () => {

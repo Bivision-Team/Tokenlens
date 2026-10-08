@@ -3,7 +3,7 @@ import path from "node:path";
 import { findTranscript, findTranscriptCandidates, findAllMainTranscripts, findSubagentTranscripts, dedupeTranscriptEntries, parseJsonl, analyzeTranscript, combineSessionTree, apiEquivalent } from "./transcript.js";
 import { renderReport, renderAggregateReport, renderSessionTreeReport, renderTeamReport } from "./report.js";
 import { dataDir } from "./privacy.js";
-import { readAgentTypes } from "./hook.js";
+import { readAgentTypes, resolveAgentType } from "./hook.js";
 
 function help() {
   return `TokenLens v0.4.0
@@ -53,7 +53,7 @@ async function analyzeWithAgents(query, json) {
     agents.push({
       kind: "agent",
       id,
-      agentType: agentTypes.get(id) || "unknown",
+      agentType: resolveAgentType(agentTypes, id, file),
       source: path.basename(file),
       report: analyzeTranscript(parsed.entries, parsed.malformed)
     });
@@ -141,8 +141,9 @@ async function analyzeAggregate(args, json) {
       return Number.isFinite(timestamp) && timestamp >= since.getTime() && timestamp <= until.getTime();
     });
     if (inPeriod.length) {
-      sessionIds.add(inPeriod.find((entry) => entry.sessionId)?.sessionId || path.basename(file, ".jsonl"));
-      entries.push(...inPeriod);
+      const sessionId = inPeriod.find((entry) => entry.sessionId)?.sessionId || path.basename(file, ".jsonl");
+      sessionIds.add(sessionId);
+      entries.push(...inPeriod.map((entry) => ({ ...entry, __tokenlensSessionId: sessionId, __tokenlensActorId: "main" })));
     }
     if (includeAgents) {
       const sessionId = path.basename(file, ".jsonl");
@@ -156,13 +157,13 @@ async function analyzeAggregate(args, json) {
           return Number.isFinite(timestamp) && timestamp >= since.getTime() && timestamp <= until.getTime();
         });
         if (!agentEntries.length) continue;
-        sessionIds.add(sessionId);
-        agentCount += 1;
-        entries.push(...agentEntries);
         const agentId = agentEntries.find((entry) => entry.agentId)?.agentId
           || path.basename(agentFile, ".jsonl").replace(/^agent-/i, "");
-        const type = types.get(String(agentId)) || "unknown";
-        const report = analyzeTranscript(agentEntries, agentParsed.malformed, { scope: "all" });
+        sessionIds.add(sessionId);
+        agentCount += 1;
+        entries.push(...agentEntries.map((entry) => ({ ...entry, __tokenlensSessionId: sessionId, __tokenlensActorId: agentId })));
+        const type = resolveAgentType(types, agentId, agentFile);
+        const report = analyzeTranscript(agentEntries, agentParsed.malformed, { scope: "all", baselineScopeComplete: false });
         const usage = agentUsage.get(type) || emptyUsage();
         addReportUsage(usage, report);
         agentUsage.set(type, usage);
@@ -171,7 +172,7 @@ async function analyzeAggregate(args, json) {
   }
 
   const deduped = dedupeTranscriptEntries(entries);
-  const base = analyzeTranscript(deduped, Array.from({ length: malformedCount }), { scope: "all" });
+  const base = analyzeTranscript(deduped, Array.from({ length: malformedCount }), { scope: "all", baselineScopeComplete: false });
   const report = {
     schema_version: 1,
     measurement_policy: base.measurement_policy,

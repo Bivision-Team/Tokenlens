@@ -3,6 +3,13 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { dataDir, fingerprint, measurement, safePath, writeJsonAtomic } from "./privacy.js";
 
+function safeAgentType(value) {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 80 || /[\u0000-\u001f\u007f]/.test(trimmed)) return undefined;
+  return trimmed;
+}
+
 export function pruneEvents(now = Date.now()) {
   const configured = Number(process.env.TOKENLENS_RETENTION_DAYS || 30);
   const retentionDays = Number.isFinite(configured) && configured >= 1 ? configured : 30;
@@ -34,10 +41,26 @@ export function readAgentTypes(sessionId) {
     if (!item.isFile() || !item.name.endsWith(".json")) continue;
     try {
       const event = JSON.parse(fs.readFileSync(path.join(directory, item.name), "utf8"));
-      if (event.agent_id && event.agent_type) types.set(String(event.agent_id), String(event.agent_type));
+      const agentType = safeAgentType(event.agent_type);
+      if (event.agent_id && agentType) types.set(String(event.agent_id), agentType);
     } catch {}
   }
   return types;
+}
+
+export function readAgentTypeFromMeta(agentTranscript) {
+  if (!agentTranscript || !/^agent-.*\.jsonl$/i.test(path.basename(agentTranscript))) return undefined;
+  const meta = agentTranscript.replace(/\.jsonl$/i, ".meta.json");
+  try {
+    const value = JSON.parse(fs.readFileSync(meta, "utf8"));
+    return safeAgentType(value.agentType);
+  } catch {
+    return undefined;
+  }
+}
+
+export function resolveAgentType(spoolTypes, agentId, agentTranscript) {
+  return spoolTypes.get(String(agentId)) || readAgentTypeFromMeta(agentTranscript) || "unknown";
 }
 
 async function readStdin() {

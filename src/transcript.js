@@ -190,6 +190,7 @@ function categoryForBlock(entry, block, toolUses) {
         ? "Other / Claude-managed"
         : "User prompts";
   }
+  if (block?.type === "thinking" || block?.type === "redacted_thinking") return "Assistant responses";
   if (block?.type === "tool_use") return "Assistant responses";
   if (block?.type === "tool_result") {
     if (block.is_error) return "Errors / retries";
@@ -200,65 +201,124 @@ function categoryForBlock(entry, block, toolUses) {
 
 function textForBlock(block) {
   if (block?.type === "tool_use") return JSON.stringify(block);
+  if (block?.type === "thinking") return block.thinking || block.text || "";
+  if (block?.type === "redacted_thinking") return "";
   return blockText(block);
+}
+
+function keepsPriorThinking(model = "") {
+  const value = String(model).toLowerCase();
+  return /claude-(?:opus-(?:4-[5-9]|[5-9])|sonnet-(?:4-[6-9]|[5-9]))/.test(value);
 }
 
 function cumulativeLinear(entries, toolUses) {
   const requests = uniqueRequests(entries);
   if (!requests.length) return {
-    categories: {}, message_tokens: 0, fixed_overhead: 0, explained: 0,
-    unattributed: null, coverage_percent: null, baseline_per_request: null
+    categories: {}, message_tokens: 0, fixed_overhead: 0,
+    fixed_overhead_method: "first_nonzero_request_floor_minus_visible",
+    conversation_growth: 0, growth_residual: null, unattributed: null,
+    growth_coverage_percent: null, baseline_per_request: null, segments: []
   };
   const requestByIndex = new Map(requests.map((request) => [request.entryIndex, request]));
   const active = new Map();
-  const categories = new Map();
-  const residuals = [];
+  const segments = [];
+  let segment;
+  const newSegment = () => {
+    segment = { inputs: [], categories: new Map() };
+    segments.push(segment);
+  };
   for (const [entryIndex, entry] of entries.entries()) {
-    if (entry.type === "system" && /compact/i.test(String(entry.subtype || ""))) active.clear();
+    if (entry.type === "system" && /compact/i.test(String(entry.subtype || ""))) {
+      active.clear();
+      segment = undefined;
+    }
     if (requestByIndex.has(entryIndex)) {
+      if (!segment) newSegment();
       const request = requestByIndex.get(entryIndex);
       let messages = 0;
       for (const [category, tokens] of active) {
-        categories.set(category, (categories.get(category) || 0) + tokens);
+        segment.categories.set(category, (segment.categories.get(category) || 0) + tokens);
         messages += tokens;
       }
       const input = request.usage.input + request.usage.cacheRead + request.usage.cacheCreation;
-      residuals.push(Math.max(0, input - messages));
+      segment.inputs.push({ input, visible_messages: messages });
+      if (keepsPriorThinking(request.model)) {
+        active.set("Assistant responses", (active.get("Assistant responses") || 0) + request.usage.output);
+      }
     }
+    const exactAssistantOutputUsed = entry.type === "assistant"
+      && Boolean(usageOf(entry))
+      && keepsPriorThinking(entry.message?.model);
     for (const block of contentBlocks(entry)) {
       const category = categoryForBlock(entry, block, toolUses);
       if (!category) continue;
+      if (exactAssistantOutputUsed && category === "Assistant responses") continue;
       active.set(category, (active.get(category) || 0) + estimateTokens(textForBlock(block)));
     }
   }
-  residuals.sort((a, b) => a - b);
-  const middle = Math.floor(residuals.length / 2);
-  const baseline = residuals.length % 2
-    ? residuals[middle]
-    : (residuals[middle - 1] + residuals[middle]) / 2;
-  const fixedOverhead = baseline * requests.length;
+  const finalized = segments.map((item, index) => {
+    const first = item.inputs.find((value) => value.input > 0);
+    const baseline = first ? Math.max(0, first.input - first.visible_messages) : 0;
+    const processedInput = item.inputs.reduce((sum, value) => sum + value.input, 0);
+    const fixedOverhead = item.inputs.reduce((sum, value) => sum + Math.min(value.input, baseline), 0);
+    const conversationGrowth = item.inputs.reduce((sum, value) => sum + Math.max(0, value.input - baseline), 0);
+    const messageTokens = [...item.categories.values()].reduce((sum, value) => sum + value, 0);
+    const growthResidual = conversationGrowth - messageTokens;
+    return {
+      segment: index + 1,
+      requests: item.inputs.length,
+      processed_input: processedInput,
+      baseline_per_request: baseline,
+      baseline_visible_messages: first?.visible_messages ?? null,
+      fixed_overhead: fixedOverhead,
+      fixed_overhead_method: "first_nonzero_request_floor_minus_visible",
+      conversation_growth: conversationGrowth,
+      categories: Object.fromEntries([...item.categories.entries()].sort((a, b) => b[1] - a[1])),
+      message_tokens: messageTokens,
+      growth_residual: growthResidual,
+      growth_coverage_percent: conversationGrowth
+        ? Number(((messageTokens / conversationGrowth) * 100).toFixed(1))
+        : null
+    };
+  });
+  const categories = new Map();
+  for (const item of finalized) {
+    for (const [category, tokens] of Object.entries(item.categories)) {
+      categories.set(category, (categories.get(category) || 0) + tokens);
+    }
+  }
+  const fixedOverhead = finalized.reduce((sum, item) => sum + item.fixed_overhead, 0);
+  const conversationGrowth = finalized.reduce((sum, item) => sum + item.conversation_growth, 0);
   const messageTokens = [...categories.values()].reduce((sum, value) => sum + value, 0);
-  const processedInput = requests.reduce((sum, request) =>
-    sum + request.usage.input + request.usage.cacheRead + request.usage.cacheCreation, 0);
-  const explained = fixedOverhead + messageTokens;
+  const growthResidual = conversationGrowth - messageTokens;
 
   return {
     categories: Object.fromEntries([...categories.entries()].sort((a, b) => b[1] - a[1])),
     message_tokens: messageTokens,
     fixed_overhead: fixedOverhead,
-    explained,
-    unattributed: processedInput - explained,
-    coverage_percent: processedInput ? Number(((explained / processedInput) * 100).toFixed(1)) : null,
-    baseline_per_request: baseline,
-    baseline_method: "median_per_request_residual"
+    fixed_overhead_method: "first_nonzero_request_floor_minus_visible",
+    conversation_growth: conversationGrowth,
+    growth_residual: growthResidual,
+    unattributed: growthResidual,
+    growth_coverage_percent: conversationGrowth
+      ? Number(((messageTokens / conversationGrowth) * 100).toFixed(1))
+      : null,
+    baseline_per_request: finalized.length === 1 ? finalized[0].baseline_per_request : null,
+    baseline_method: "first_nonzero_request_floor_minus_visible",
+    assistant_output_basis: "exact_output_for_keep_all_thinking_models_otherwise_visible_estimate",
+    segments: finalized
   };
 }
 
-function cumulativeAttribution(entries, toolUses) {
+function cumulativeAttribution(entries, toolUses, baselineScopeComplete = true) {
   const groups = new Map();
+  const knownSessions = new Set(entries.map((entry) => entry.__tokenlensSessionId || entry.sessionId || entry.session_id).filter(Boolean));
+  const knownActors = new Set(entries.map((entry) => entry.__tokenlensActorId || entry.agentId || entry.agent_id).filter(Boolean));
+  const defaultSession = knownSessions.size === 1 ? [...knownSessions][0] : "single";
+  const defaultActor = knownActors.size === 1 ? [...knownActors][0] : "main";
   for (const entry of entries) {
-    const session = entry.sessionId || entry.session_id || "single";
-    const actor = entry.agentId || entry.agent_id || "main";
+    const session = entry.__tokenlensSessionId || entry.sessionId || entry.session_id || defaultSession;
+    const actor = entry.__tokenlensActorId || entry.agentId || entry.agent_id || defaultActor;
     const key = `${session}:${actor}`;
     const group = groups.get(key) || [];
     group.push(entry);
@@ -273,21 +333,29 @@ function cumulativeAttribution(entries, toolUses) {
   }
   const messageTokens = [...categories.values()].reduce((sum, value) => sum + value, 0);
   const fixedOverhead = parts.reduce((sum, part) => sum + part.fixed_overhead, 0);
-  const explained = messageTokens + fixedOverhead;
-  const unattributed = parts.every((part) => part.unattributed === null)
-    ? null
-    : parts.reduce((sum, part) => sum + (part.unattributed || 0), 0);
-  const exact = explained + (unattributed || 0);
+  const conversationGrowth = parts.reduce((sum, part) => sum + part.conversation_growth, 0);
+  const growthResidual = conversationGrowth - messageTokens;
+  const segments = parts.flatMap((part, groupIndex) => part.segments.map((item) => ({
+    ...item,
+    transcript_group: groupIndex + 1
+  })));
   return {
     categories: Object.fromEntries([...categories.entries()].sort((a, b) => b[1] - a[1])),
     message_tokens: messageTokens,
     fixed_overhead: fixedOverhead,
-    explained,
-    unattributed,
-    coverage_percent: exact ? Number(((explained / exact) * 100).toFixed(1)) : null,
-    baseline_per_request: null,
-    baseline_method: "median_per_request_residual",
-    transcript_groups: parts.length
+    fixed_overhead_method: "first_nonzero_request_floor_minus_visible",
+    conversation_growth: conversationGrowth,
+    growth_residual: growthResidual,
+    unattributed: growthResidual,
+    growth_coverage_percent: conversationGrowth
+      ? Number(((messageTokens / conversationGrowth) * 100).toFixed(1))
+      : null,
+    baseline_per_request: segments.length === 1 ? segments[0].baseline_per_request : null,
+    baseline_method: "first_nonzero_request_floor_minus_visible",
+    assistant_output_basis: "exact_output_for_keep_all_thinking_models_otherwise_visible_estimate",
+    baseline_scope_complete: baselineScopeComplete,
+    transcript_groups: parts.length,
+    segments
   };
 }
 
@@ -306,12 +374,12 @@ export function apiEquivalent(exactTotals) {
 
 export function recommendationsForReport(report) {
   const recommendations = [];
-  const processed = report.session?.processed_input ?? report.totals?.processed_input;
   const cumulative = report.context?.cumulative ?? report.totals?.cumulative;
-  const fixedShare = processed && cumulative ? cumulative.fixed_overhead / processed : 0;
-  if (fixedShare >= 0.6) recommendations.push({
-    rule: "fixed-overhead-high", severity: "high", threshold: ">=60%",
-    observed: Number((fixedShare * 100).toFixed(1)),
+  const fixedBaselineThreshold = 75_000;
+  const maxBaseline = Math.max(0, ...(cumulative?.segments || []).map((item) => item.baseline_per_request || 0));
+  if (cumulative?.baseline_scope_complete !== false && maxBaseline >= fixedBaselineThreshold) recommendations.push({
+    rule: "fixed-overhead-high", severity: "high", threshold: ">=75k measured baseline/request",
+    observed: maxBaseline,
     action: "Reduce always-loaded CLAUDE.md/rules, plugin descriptions, and MCP tool schemas; defer optional tools."
   });
   const bash = cumulative?.categories?.["Bash / test output"] || 0;
@@ -435,13 +503,14 @@ export function analyzeTranscript(entries, malformed = [], options = {}) {
     cacheCreation: sum.cacheCreation + request.usage.cacheCreation,
     output: sum.output + request.usage.output
   }), { input: 0, cacheRead: 0, cacheCreation: 0, output: 0 });
-  const cumulative = cumulativeAttribution(entries, toolUses);
+  const cumulative = cumulativeAttribution(entries, toolUses, options.baselineScopeComplete !== false);
 
   const report = {
     schema_version: 1,
     measurement_policy: {
       request_usage: "exact",
       category_tokens: "estimated",
+      input_split: "derived_from_exact_usage_and_estimated_visible_messages",
       avoidability: "heuristic"
     },
     session: {
@@ -468,8 +537,14 @@ export function analyzeTranscript(entries, malformed = [], options = {}) {
       ...(failures.length
         ? [`Session contains ${failures.length} failed API request(s)${failures.some((failure) => failure.status === 429) ? "; status 429 means the usage limit or rate limit was reached" : ""}.`]
         : []),
+      ...(cumulative.growth_coverage_percent !== null && cumulative.growth_coverage_percent < 70
+        ? [`Growth coverage is ${cumulative.growth_coverage_percent.toFixed(1)}%; category-level conclusions are low confidence below 70%.`]
+        : []),
+      ...(cumulative.baseline_scope_complete === false
+        ? ["The selected period begins inside one or more sessions; fixed-baseline recommendations are suppressed because segment starts are incomplete."]
+        : []),
       "Unique and cumulative category values are estimates; Claude Code does not expose exact additive per-message token counts.",
-      "Cumulative attribution uses transcript order and compaction markers; fixed overhead uses the median per-request gap between exact input and estimated visible messages.",
+      "The fixed-baseline/growth split reconciles exactly to recorded input, but its boundary is derived from exact first-request input minus estimated visible messages for each compaction segment.",
       "Potential savings assume the task trajectory would remain unchanged."
     ]
   };
@@ -512,7 +587,14 @@ export function combineSessionTree(main, agents = []) {
 
   const cumulativeMessageTokens = [...cumulativeCategories.values()].reduce((sum, value) => sum + value, 0);
   const fixedOverhead = members.reduce((sum, member) => sum + member.report.context.cumulative.fixed_overhead, 0);
-  const explained = fixedOverhead + cumulativeMessageTokens;
+  const conversationGrowth = members.reduce((sum, member) => sum + member.report.context.cumulative.conversation_growth, 0);
+  const growthResidual = conversationGrowth - cumulativeMessageTokens;
+  const cumulativeSegments = members.flatMap((member) => member.report.context.cumulative.segments.map((segment) => ({
+    ...segment,
+    member_id: member.id,
+    member_kind: member.kind,
+    agent_type: member.agentType || null
+  })));
   const repeatedCommands = new Map();
   for (const member of members) {
     for (const item of member.report.repeated_commands || []) {
@@ -543,9 +625,17 @@ export function combineSessionTree(main, agents = []) {
         categories: Object.fromEntries([...cumulativeCategories.entries()].sort((a, b) => b[1] - a[1])),
         message_tokens: cumulativeMessageTokens,
         fixed_overhead: fixedOverhead,
-        explained,
-        unattributed: processedInput === null ? null : processedInput - explained,
-        coverage_percent: processedInput ? Number(((explained / processedInput) * 100).toFixed(1)) : null
+        fixed_overhead_method: "first_nonzero_request_floor_minus_visible",
+        conversation_growth: conversationGrowth,
+        growth_residual: growthResidual,
+        unattributed: growthResidual,
+        growth_coverage_percent: conversationGrowth
+          ? Number(((cumulativeMessageTokens / conversationGrowth) * 100).toFixed(1))
+          : null,
+        baseline_per_request: null,
+        baseline_method: "first_nonzero_request_floor_minus_visible",
+        baseline_scope_complete: members.every((member) => member.report.context.cumulative.baseline_scope_complete !== false),
+        segments: cumulativeSegments
       }
     },
     main: sessionTreeMember(main, processedInput),
@@ -561,6 +651,9 @@ export function combineSessionTree(main, agents = []) {
     warnings: [
       ...(members.reduce((sum, member) => sum + member.report.session.failed_requests.count, 0)
         ? [`Session tree contains ${members.reduce((sum, member) => sum + member.report.session.failed_requests.count, 0)} failed API request(s)${members.some((member) => member.report.session.failed_requests.statuses.includes(429)) ? "; status 429 means the usage limit or rate limit was reached" : ""}.`]
+        : []),
+      ...(conversationGrowth && (cumulativeMessageTokens / conversationGrowth) * 100 < 70
+        ? [`Combined growth coverage is ${((cumulativeMessageTokens / conversationGrowth) * 100).toFixed(1)}%; category-level conclusions are low confidence below 70%.`]
         : []),
       ...new Set(members.flatMap((member) => member.report.warnings)
         .filter((warning) => !warning.startsWith("Session contains "))),
@@ -589,6 +682,7 @@ function sessionTreeMember(member, totalProcessedInput) {
     last_request_input: last ? last.input + last.cacheRead + last.cacheCreation : null,
     attributed_message_tokens: report.context.attributed_message_tokens,
     categories: report.context.categories,
+    cumulative: report.context.cumulative,
     share_percent: sharePercent(report.session.processed_input, totalProcessedInput)
   };
 }
