@@ -89,7 +89,10 @@ claude plugin validate --strict .
 
 - API request input, output, cache-read, and cache-creation totals come from Claude Code transcript usage and are marked **exact**.
 - Message-category and per-file values are local estimates. Claude Code does not expose exact additive token counts for each message component.
-- Reports show both unique message content and estimated cumulative exposure across requests, plus fixed overhead, unexplained remainder, and coverage.
+- Reports split exact processed input into a derived measured fixed baseline and conversation growth for each transcript and compaction segment. These two non-negative values reconcile exactly to processed input.
+- Existing cumulative message categories explain conversation growth. Growth coverage and its residual remain estimated and can fail; values below 70% are labelled low confidence rather than forced to reconcile.
+- A large first prompt is subtracted as visible conversation content instead of inflating the fixed baseline. `fixed-overhead-high` uses an absolute measured baseline/request threshold.
+- Subagent types come from privacy-safe hook metadata, with an `agentType` fallback from the adjacent Claude Code `.meta.json` when the spool has no entry.
 - API-equivalent input uses normalized multipliers (fresh input 1x, standard 5-minute cache write 1.25x, cache read 0.1x). It is not a subscription charge or invoice.
 - Repeated-read savings are heuristic counterfactuals, not guaranteed savings.
 - Reported costs, when added, will be API-equivalent estimates and may not equal subscription charges or provider invoices.
@@ -108,6 +111,6 @@ See [docs/privacy.md](docs/privacy.md) and [docs/accuracy.md](docs/accuracy.md).
 
 ## Current scope
 
-v0.4 supports unique and cumulative context attribution, coverage and fixed-overhead estimates, exact request totals, API-equivalent input weighting, named subagent types, team JSON rollups, threshold-based actions, retention-limited hook metadata, repeated-read detection, period aggregation, terminal output, and JSON output.
+The current v0.4 line supports unique and cumulative context attribution, baseline/growth decomposition, growth coverage, exact request totals, API-equivalent input weighting, named subagent types, team JSON rollups, threshold-based actions, retention-limited hook metadata, repeated-read detection, period aggregation, terminal output, and JSON output.
 
 Live OTLP ingestion, provider billing reconciliation, and behavior-changing optimizations are intentionally outside this first milestone.

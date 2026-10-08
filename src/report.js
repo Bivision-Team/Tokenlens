@@ -14,17 +14,28 @@ function pushApiEquivalent(lines, usage) {
 
 function pushCumulative(lines, cumulative) {
   if (!cumulative) return;
+  const baseline = cumulative.baseline_per_request === null
+    ? "varies by segment"
+    : `${compact(cumulative.baseline_per_request)}/request`;
   lines.push(
     "",
-    "Cumulative input attribution  [estimated]",
-    `  Message exposure:     ~${compact(cumulative.message_tokens)}`,
-    `  Fixed overhead:       ~${compact(cumulative.fixed_overhead)}`,
-    `  Explained:            ~${compact(cumulative.explained)}`,
-    `  Unattributed:         ~${compact(cumulative.unattributed)}`,
-    `  Coverage:              ${cumulative.coverage_percent === null ? "n/a" : `${cumulative.coverage_percent.toFixed(1)}%`}`
+    `Cumulative input decomposition${cumulative.baseline_scope_complete === false ? "  [partial-period baseline]" : ""}`,
+    `  Measured fixed baseline (first-request floor): ${baseline}  [derived]`,
+    `  Fixed-baseline exposure:                      ${compact(cumulative.fixed_overhead)}  [derived]`,
+    `  Conversation growth:                          ${compact(cumulative.conversation_growth)}  [derived]`,
+    `  Estimated message exposure:                  ~${compact(cumulative.message_tokens)}`,
+    `  Growth residual:                             ~${compact(cumulative.growth_residual)}`,
+    `  Growth coverage:                              ${cumulative.growth_coverage_percent === null ? "n/a" : `${cumulative.growth_coverage_percent.toFixed(1)}%${cumulative.growth_coverage_percent < 70 ? " — LOW CONFIDENCE" : ""}`}  [estimated]`
   );
   for (const [name, tokens] of Object.entries(cumulative.categories || {})) {
     lines.push(`    ${name.padEnd(22)} ~${compact(tokens)}`);
+  }
+  if ((cumulative.segments || []).length > 1) {
+    lines.push("  Segment baselines:");
+    for (const item of cumulative.segments) {
+      const owner = item.member_id ? ` ${item.member_kind}:${item.member_id}` : "";
+      lines.push(`    segment ${item.segment}${owner}  ${compact(item.baseline_per_request)}/request  ${item.requests} requests`);
+    }
   }
 }
 
@@ -182,8 +193,12 @@ export function renderSessionTreeReport(report) {
     const share = member.share_percent === null ? "n/a" : `${member.share_percent.toFixed(1)}%`;
     lines.push(
       `  ${label} ${member.id}${type}  ${member.usage.requests} requests  ${compact(member.usage.processed_input)} processed  ${share}`,
-      `       last request ${compact(member.last_request_input)}  attributed ~${compact(member.attributed_message_tokens)}`
+      `       last request ${compact(member.last_request_input)}  attributed ~${compact(member.attributed_message_tokens)}`,
+      `       baseline/request ${compact(member.cumulative.baseline_per_request)}  growth ${compact(member.cumulative.conversation_growth)}  growth coverage ${member.cumulative.growth_coverage_percent === null ? "n/a" : `${member.cumulative.growth_coverage_percent.toFixed(1)}%${member.cumulative.growth_coverage_percent < 70 ? " LOW CONFIDENCE" : ""}`}`
     );
+    if ((member.cumulative.segments || []).length > 1) {
+      lines.push(`       segment baselines ${(member.cumulative.segments || []).map((item) => compact(item.baseline_per_request)).join(", ")}`);
+    }
   }
 
   if (report.top_consumer) {
